@@ -1,8 +1,11 @@
 #include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
 #include <glib.h>
 #include <stdio.h>
 #include <signal.h>
 #include <time.h>
+#include <stdint.h>
 
 // Biến đánh dấu sự kiện Ctrl + t
 gboolean ctrl_t_pressed = FALSE;
@@ -31,10 +34,14 @@ cb_have_data(GstPad *pad,
              GstPadProbeInfo *info,
              gpointer user_data)
 {
-
-    GstBuffer *buffer;
-    GstMapInfo map;
+    GstBuffer *buffer, *copied_buffer;
     buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    copied_buffer = gst_buffer_copy(buffer);
+    if (copied_buffer == NULL)
+    {
+        g_print("Failed to create a copy of the buffer.\n");
+        return GST_PAD_PROBE_OK;
+    }
 
     if (ctrl_t_pressed && buffer)
     {
@@ -50,22 +57,45 @@ cb_have_data(GstPad *pad,
         gchar filename[100]; // Dùng để lưu tên tệp
         g_snprintf(filename, sizeof(filename), "snapshot_%s.jpg", timestamp);
 
-        if (gst_buffer_map(buffer, &map, GST_MAP_READ))
-        {
-            FILE *file = fopen(filename, "wb");
-            if (file)
-            {
-                fwrite(map.data, 1, map.size, file);
-                fclose(file);
-                g_print("Snapshot saved as %s\n", filename);
-            }
-            else
-            {
-                g_print("Failed to save snapshot\n");
-            }
+        //----------------------------------------------------------------------------------------------
+        GstElement *my_pipeline, *appsrc, *jpegenc, *filesink;
 
-            gst_buffer_unmap(buffer, &map);
+        my_pipeline = gst_pipeline_new("my-pipeline");
+        appsrc = gst_element_factory_make("appsrc", "app-source");
+        jpegenc = gst_element_factory_make("jpegenc", "jpegenc");
+        filesink = gst_element_factory_make("filesink", "filesink");
+
+        if (!my_pipeline || !appsrc || !jpegenc || !filesink)
+        {
+            g_printerr("One or more elements could not be created. Exiting.\n");
+            return FALSE;
         }
+
+        g_object_set(G_OBJECT(filesink), "location", filename, NULL);
+        gst_bin_add_many(GST_BIN(my_pipeline), appsrc, jpegenc, filesink, NULL);
+        if (!gst_element_link_many(appsrc, jpegenc, filesink, NULL))
+        {
+            g_printerr("Elements could not be linked. Exiting.\n");
+            gst_object_unref(my_pipeline);
+            return FALSE;
+        }
+
+        gst_element_set_state(my_pipeline, GST_STATE_PLAYING);
+
+        gboolean ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), copied_buffer);
+
+        if (ret == GST_FLOW_OK)
+        {
+            g_print("Pushed buffer successfully.\n");
+        }
+        else
+        {
+            g_print("Pushed buffer with an error: %s\n", gst_flow_get_name(ret));
+        }
+
+        gst_element_set_state(my_pipeline, GST_STATE_NULL);
+        gst_object_unref(my_pipeline);
+        gst_buffer_unref(copied_buffer);
     }
 
     return GST_PAD_PROBE_OK;
@@ -88,7 +118,7 @@ gint main(gint argc,
     g_io_add_watch(io_stdin, G_IO_IN, key_event_handler, NULL);
 
     /* build */
-    pipeline = gst_pipeline_new("my-pipeline");
+    pipeline = gst_pipeline_new("pipeline");
     src = gst_element_factory_make("videotestsrc", "src");
     if (src == NULL)
         g_error("Could not create 'videotestsrc' element");
@@ -119,15 +149,13 @@ gint main(gint argc,
     g_object_set(G_OBJECT(filter), "caps", filtercaps, NULL);
     gst_caps_unref(filtercaps);
 
-    pad = gst_element_get_static_pad(src, "src");
+    pad = gst_element_get_static_pad(sink, "sink");
     gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
                       (GstPadProbeCallback)cb_have_data, NULL, NULL);
     gst_object_unref(pad);
 
-    /* run */
     gst_element_set_state(pipeline, GST_STATE_PLAYING);
 
-    /* wait until it's up and running or failed */
     if (gst_element_get_state(pipeline, NULL, NULL, -1) == GST_STATE_CHANGE_FAILURE)
     {
         g_error("Failed to go into PLAYING state");
