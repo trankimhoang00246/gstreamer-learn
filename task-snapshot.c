@@ -34,10 +34,11 @@ cb_have_data(GstPad *pad,
              GstPadProbeInfo *info,
              gpointer user_data)
 {
-    GstBuffer *buffer, *copied_buffer;
+    GstBuffer *buffer, *inputBuffer;
     buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-    copied_buffer = gst_buffer_copy(buffer);
-    if (copied_buffer == NULL)
+    inputBuffer = gst_buffer_copy(buffer);
+
+    if (inputBuffer == NULL)
     {
         g_print("Failed to create a copy of the buffer.\n");
         return GST_PAD_PROBE_OK;
@@ -58,44 +59,18 @@ cb_have_data(GstPad *pad,
         g_snprintf(filename, sizeof(filename), "snapshot_%s.jpg", timestamp);
 
         //----------------------------------------------------------------------------------------------
-        GstElement *my_pipeline, *appsrc, *jpegenc, *filesink;
-
-        my_pipeline = gst_pipeline_new("my-pipeline");
-        appsrc = gst_element_factory_make("appsrc", "app-source");
-        jpegenc = gst_element_factory_make("jpegenc", "jpegenc");
-        filesink = gst_element_factory_make("filesink", "filesink");
-
-        if (!my_pipeline || !appsrc || !jpegenc || !filesink)
+        GstMapInfo map;
+        if (gst_buffer_map(inputBuffer, &map, GST_MAP_READ))
         {
-            g_printerr("One or more elements could not be created. Exiting.\n");
-            return FALSE;
+            // Lưu dữ liệu từ map.data thành tệp JPEG
+            FILE *jpeg_file = fopen(filename, "wb");
+            if (jpeg_file)
+            {
+                fwrite(map.data, 1, map.size, jpeg_file);
+                fclose(jpeg_file);
+            }
+            gst_buffer_unmap(inputBuffer, &map);
         }
-
-        g_object_set(G_OBJECT(filesink), "location", filename, NULL);
-        gst_bin_add_many(GST_BIN(my_pipeline), appsrc, jpegenc, filesink, NULL);
-        if (!gst_element_link_many(appsrc, jpegenc, filesink, NULL))
-        {
-            g_printerr("Elements could not be linked. Exiting.\n");
-            gst_object_unref(my_pipeline);
-            return FALSE;
-        }
-
-        gst_element_set_state(my_pipeline, GST_STATE_PLAYING);
-
-        gboolean ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), copied_buffer);
-
-        if (ret == GST_FLOW_OK)
-        {
-            g_print("Pushed buffer successfully.\n");
-        }
-        else
-        {
-            g_print("Pushed buffer with an error: %s\n", gst_flow_get_name(ret));
-        }
-
-        gst_element_set_state(my_pipeline, GST_STATE_NULL);
-        gst_object_unref(my_pipeline);
-        gst_buffer_unref(copied_buffer);
     }
 
     return GST_PAD_PROBE_OK;
@@ -105,8 +80,7 @@ gint main(gint argc,
           gchar *argv[])
 {
     GMainLoop *loop;
-    GstElement *pipeline, *src, *sink, *filter, *csp;
-    GstCaps *filtercaps;
+    GstElement *pipeline, *src, *sink, *csp;
     GstPad *pad;
 
     /* init GStreamer */
@@ -123,14 +97,11 @@ gint main(gint argc,
     if (src == NULL)
         g_error("Could not create 'videotestsrc' element");
 
-    filter = gst_element_factory_make("capsfilter", "filter");
-    g_assert(filter != NULL); /* should always exist */
-
     csp = gst_element_factory_make("videoconvert", "csp");
     if (csp == NULL)
         g_error("Could not create 'videoconvert' element");
 
-    sink = gst_element_factory_make("xvimagesink", "sink");
+    sink = gst_element_factory_make("autovideosink", "sink");
     if (sink == NULL)
     {
         sink = gst_element_factory_make("ximagesink", "sink");
@@ -138,18 +109,13 @@ gint main(gint argc,
             g_error("Could not create neither 'xvimagesink' nor 'ximagesink' element");
     }
 
-    gst_bin_add_many(GST_BIN(pipeline), src, filter, csp, sink, NULL);
-    gst_element_link_many(src, filter, csp, sink, NULL);
-    filtercaps = gst_caps_new_simple("video/x-raw",
-                                     "format", G_TYPE_STRING, "RGB16",
-                                     "width", G_TYPE_INT, 384,
-                                     "height", G_TYPE_INT, 288,
-                                     "framerate", GST_TYPE_FRACTION, 25, 1,
-                                     NULL);
-    g_object_set(G_OBJECT(filter), "caps", filtercaps, NULL);
-    gst_caps_unref(filtercaps);
+    GstElement *jpegenc = gst_element_factory_make("jpegenc", "jpegenc");
+    GstElement *jpegdec = gst_element_factory_make("jpegdec", "jpegdec");
 
-    pad = gst_element_get_static_pad(sink, "sink");
+    gst_bin_add_many(GST_BIN(pipeline), src, jpegenc, jpegdec, csp, sink, NULL);
+    gst_element_link_many(src, jpegenc, jpegdec, csp, sink, NULL);
+
+    pad = gst_element_get_static_pad(jpegdec, "sink");
     gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
                       (GstPadProbeCallback)cb_have_data, NULL, NULL);
     gst_object_unref(pad);
@@ -170,3 +136,6 @@ gint main(gint argc,
 
     return 0;
 }
+
+// gcc -o task-snapshot task-snapshot.c $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0)
+//./task-snapshot
